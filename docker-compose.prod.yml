@@ -1,0 +1,99 @@
+# BioTrace AI — single-VM production layout.
+#
+# Three containers:
+#   falkordb   FalkorDB (Redis-protocol graph) + browser UI
+#   backend    FastAPI / Uvicorn on 8000
+#   frontend   Next.js standalone server on 8080 (host-mapped to 3010)
+#
+# Frontend and backend share the same host, so the browser is configured to talk
+# to the backend on the same scheme/host/port as the page itself:
+#   NEXT_PUBLIC_API_BASE=$SELF   ->  http://<vm>:3010
+# This keeps the UI portable between localhost, preview, and a public VM without
+# rebuilding the frontend image for each deployment.
+
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    container_name: biotrace-falkordb
+    restart: unless-stopped
+    # Redis protocol (backend) + FalkorDB browser UI (humans / ops).
+    ports:
+      - "6379:6379"
+      - "3001:3000"
+    environment:
+      - FALKORDB_ARGS=MAX_QUEUED_QUERIES 100 TIMEOUT 1000
+    volumes:
+      - falkordb_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: biotrace-backend
+    restart: unless-stopped
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    environment:
+      - FALKORDB_HOST=falkordb
+      - FALKORDB_PORT=6379
+      - FALKORDB_GRAPH=biotrace_knowledge_graph
+      # Default to the deterministic / offline embedder so the image starts
+      # without any external API key. Switch to "auto" or "openai" once keys
+      # are provided.
+      - EMBEDDING_PROVIDER=hash
+      # Sandbox capacity for the VM deployment.
+      - SANDBOX_MAX_SESSIONS=32
+      # Public-facing bind for the container.
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      # Allow the frontend on the same host through CORS.
+      - CORS_ORIGINS=http://localhost:3010,http://127.0.0.1:3010
+    ports:
+      - "8000:8000"
+    # Do not auto-ingest the graph here - that is an operational step run once
+    # against the live DB, e.g. docker compose exec backend python -m
+    # scripts.ingest_graph --verify.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,os; urllib.request.urlopen(os.environ.get('API_BASE','http://127.0.0.1:8000')+'/api/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      # Pass the backend base URL at build time so the standalone bundle knows
+      # where to reach the API without a runtime proxy.
+      args:
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://${VM_HOST:-localhost}:3010}
+    container_name: biotrace-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      # Runtime override takes precedence so a single built image can be pointed
+      # at the real VM after its IP is known. The container default mirrors the
+      # build arg, which keeps localhost builds behaving like the shipped image.
+      - NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE:-http://${VM_HOST:-localhost}:3010}
+    ports:
+      # Host port 3010 -> container port 8080 (Next.js standalone server).
+      - "3010:8080"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  falkordb_data:

@@ -1,0 +1,27 @@
+# BioTrace AI — mandatory core database: FalkorDB
+#
+#   docker compose up -d
+#
+# FalkorDB ships its own Redis server with the graph module preloaded, plus a
+# RedisInsight-style browser UI on port 3001. The default 3000 is avoided on
+# purpose so it never collides with a local Next.js dev server.
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    container_name: biotrace-falkordb
+    restart: unless-stopped
+    ports:
+      - "6379:6379"   # Redis protocol (used by the falkordb Python client)
+      - "3001:3000"   # FalkorDB browser UI
+    environment:
+      - FALKORDB_ARGS=MAX_QUEUED_QUERIES 100 TIMEOUT 1000
+    volumes:
+      - falkordb_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  falkordb_data:
